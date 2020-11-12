@@ -1,3 +1,3 @@
-The hank you for your wish to contribute.
+Thank for wishing to contribute.
 
-As soon as the project is ready for contribuing this file will be updated.
+This file will be updated as soon as the project is ready for contributions.
