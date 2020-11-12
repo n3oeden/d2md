@@ -1,0 +1,264 @@
+#!/bin/bash
+# Vina automating script
+
+# MGLTools version
+MGLTOOLS_VER=1.5.6rc2
+
+# Try to automatically set Autodock home directory
+AUTODOCK_HOME="$HOME"
+if grep "Startup" ~/.mgltools/${MGLTOOLS_VER}/.settings &> /dev/null; then
+  COUNT=-1
+  while read LINE; do
+    if [ "x$LINE" == "xS'Startup Directory'" ]; then
+      COUNT=1
+    elif [ $COUNT -eq 0 ]; then
+      AUTODOCK_HOME="$(echo \"$LINE\" | cut -d \' -f 2)"
+      break
+    else
+      COUNT=$(expr $COUNT - 1)
+    fi
+  done < "${HOME}/.mgltools/${MGLTOOLS_VER}/.settings"
+fi
+cd $AUTODOCK_HOME
+
+# Optional parameters defaults
+OS=$(uname)
+if [ "$OS" == "Darwin" ]; then
+  DEFAULT_CPU=$(sysctl -n hw.ncpu)
+elif [ "$OS" == "Linux" ]; then
+  DEFAULT_CPU=$(grep processor /proc/cpuinfo | wc -l)
+else
+  DEFAULT_CPU=1
+fi
+DEFAULT_EXHAUSTIVENESS=8
+DEFAULT_NUM_MODES=9
+
+function print_usage() {
+  echo "[USAGE] $(basename $0) -l <ligand> -g <grid> [-c #{cpu}] [-e exhaustiveness] [-m #{modes}]"
+  echo "        NOTE: avoid any extension. Assuming .pdbqt for ligand and .gpf for grid"
+  echo "              Number of CPUs, modes and exhaustiveness greater than 0"
+}
+
+function set_params() {
+  case "$1" in
+    -l)
+      LIGAND_FILE="$2"
+      ;;
+    -g)
+      GRID_FILE="$2"
+      ;;
+    -c)
+      CPU="$2"
+      ;;
+    -e)
+      EXHAUSTIVENESS="$2"
+      ;;
+    -m)
+      NUM_MODES="$2"
+      ;;
+    *)
+      print_usage
+      exit 1
+      ;;
+  esac
+}
+
+# Command line parameters, if any
+if [ $# -gt 0 ]; then
+  if [ $(expr $# % 2) -ne 0 ]; then
+    print_usage
+    exit 1
+  fi
+  while [ $# -gt 0 ]; do
+    OPT="$1"
+    shift
+    VALUE="$1"
+    shift
+    set_params $OPT $VALUE
+  done
+  
+  if [ "x$LIGAND_FILE" == "x" -o "x$GRID_FILE" == "x" ]; then
+    print_usage
+    exit 1
+  fi
+  
+  if [ "x$CPU" == "x" ]; then
+    CPU=$DEFAULT_CPU
+  fi
+  if ! [[ "$CPU" =~ ^[0-9]+$ ]]; then
+    print_usage
+    exit 1
+  fi
+  if [ $CPU -lt 1 -o $CPU -gt $DEFAULT_CPU ]; then
+    print_usage
+    exit 1
+  fi
+
+  if [ "x$EXHAUSTIVENESS" == "x" ]; then
+    EXHAUSTIVENESS=$DEFAULT_EXHAUSTIVENESS
+  fi
+  if ! [[ "$EXHAUSTIVENESS" =~ ^[0-9]+$ ]]; then
+    print_usage
+    exit 1
+  fi
+  if [ $EXHAUSTIVENESS -lt 1 ]; then
+    print_usage
+    exit 1
+  fi
+
+  if [ "x$NUM_MODES" == "x" ]; then
+    NUM_MODES=$DEFAULT_NUM_MODES
+  fi
+  if ! [[ "$NUM_MODES" =~ ^[0-9]+$ ]]; then
+    print_usage
+    exit 1
+  fi
+  if [ $NUM_MODES -lt 1 ]; then
+    print_usage
+    exit 1
+  fi
+fi
+
+# Title
+cat <<END
++--------------------------------+
+| Vina docking procedure started |
++--------------------------------+
+
+Good morning, $USER :)
+END
+
+# Ligand selection
+echo -e "\n[STEP 1] Data imputing"
+
+if [ "x$LIGAND_FILE" == "x" ]; then
+  read -p "-> Insert ligand file name (without extension): " LIGAND_FILE
+fi
+if [ ! -f ${LIGAND_FILE}.pdbqt -o ! -r ${LIGAND_FILE}.pdbqt ]; then
+  echo -e "\n[ERROR] Cannot read ligand file \"${LIGAND_FILE}.pdbqt\"!"
+  exit 1
+fi
+
+# Grid selection
+DEFAULT_GRID=grid
+echo
+if [ "x$GRID_FILE" == "x" ]; then
+  read -p "-> Insert grid file name (without extension) [$DEFAULT_GRID]: " GRID_FILE
+fi
+if [ "x$GRID_FILE" == "x" ]; then
+  GRID_FILE=$DEFAULT_GRID
+fi
+if [ ! -f ${GRID_FILE}.gpf -o ! -r ${GRID_FILE}.gpf ]; then
+  echo -e "\n[ERROR] Cannot read grid file \"${GRID_FILE}.gpf\"!"
+  exit 1
+fi
+
+# Determining grid size
+SPACING=$(awk 'NR==3' ${GRID_FILE}.gpf | cut -d ' ' -f 2)
+declare -a GRID_SIZE
+COUNT=1
+for TOKEN in $(awk "NR==1" ${GRID_FILE}.gpf | cut -d ' ' -f 2,3,4); do
+  GRID_SIZE[${COUNT}]=$(echo "scale=5; ${TOKEN} * ${SPACING}" | bc)
+  COUNT=$(expr $COUNT + 1)
+done
+
+# Determining grid center
+declare -a GRID_CENTER
+COUNT=1
+for TOKEN in $(awk "NR==7" ${GRID_FILE}.gpf | cut -d ' ' -f 2,3,4); do
+  GRID_CENTER[${COUNT}]=${TOKEN}
+  COUNT=$(expr $COUNT + 1)
+done
+
+# Determining receptor
+RECEPTOR_FILE=$(awk "NR==6" ${GRID_FILE}.gpf | cut -d ' ' -f 2)
+
+# Summary of mandatory parameters
+cat <<END
+
+All mandatory parameters have been collected:
+
+-> Receptor: ${RECEPTOR_FILE}
+-> Ligand:   ${LIGAND_FILE}.pdbqt
+-> Grid:     ( ${GRID_CENTER[1]}, ${GRID_CENTER[2]}, ${GRID_CENTER[3]} ) ${GRID_SIZE[1]} x ${GRID_SIZE[2]} x ${GRID_SIZE[3]}
+
+END
+
+# Optional parameters imputing
+if [ "x$CPU" == "x" ]; then
+  read -p "-> Insert the number of CPUs [$DEFAULT_CPU]: " CPU
+fi
+if [ "x$CPU" == "x" ]; then
+  CPU=$DEFAULT_CPU
+fi
+if ! [[ "$CPU" =~ ^[0-9]+$ ]]; then
+  print_usage
+  exit 1
+fi
+if [ $CPU -lt 1 -o $CPU -gt $DEFAULT_CPU ]; then
+  print_usage
+  exit 1
+fi
+
+if [ "x$EXHAUSTIVENESS" == "x" ]; then
+  read -p "-> Insert the exhaustiveness of the local search [$DEFAULT_EXHAUSTIVENESS]: " EXHAUSTIVENESS
+fi
+if [ "x$EXHAUSTIVENESS" == "x" ]; then
+  EXHAUSTIVENESS=$DEFAULT_EXHAUSTIVENESS
+fi
+if ! [[ "$EXHAUSTIVENESS" =~ ^[0-9]+$ ]]; then
+  print_usage
+  exit 1
+fi
+if [ $EXHAUSTIVENESS -lt 1 ]; then
+  print_usage
+  exit 1
+fi
+
+
+if [ "x$NUM_MODES" == "x" ]; then
+  read -p "-> Insert the number of conformations to calculate [$DEFAULT_NUM_MODES]: " NUM_MODES
+fi
+if [ "x$NUM_MODES" == "x" ]; then
+  NUM_MODES=$DEFAULT_NUM_MODES
+fi
+if ! [[ "$NUM_MODES" =~ ^[0-9]+$ ]]; then
+  print_usage
+  exit 1
+fi
+if [ $NUM_MODES -lt 1 ]; then
+  print_usage
+  exit 1
+fi
+
+
+# Configuration file building
+cat > vina_config_$LIGAND_FILE <<END
+# Vina configuration file for ligand $LIGAND_FILE
+# grid=$GRID_FILE
+receptor=$RECEPTOR_FILE
+ligand=${LIGAND_FILE}.pdbqt
+center_x=${GRID_CENTER[1]}
+center_y=${GRID_CENTER[2]}
+center_z=${GRID_CENTER[3]}
+size_x=${GRID_SIZE[1]}
+size_y=${GRID_SIZE[2]}
+size_z=${GRID_SIZE[3]}
+out=${LIGAND_FILE}_vina.pdbqt
+log=${LIGAND_FILE}_vina.log
+cpu=$CPU
+exhaustiveness=$EXHAUSTIVENESS
+num_modes=$NUM_MODES
+END
+
+# Performing docking
+echo -e "\n[STEP 2] Docking simulation\n"
+vina --config vina_config_$LIGAND_FILE
+if [ $? -eq 0 ]; then
+  echo -e "\n[SUCCESS] Procedure done!"
+  exit 0
+else
+  echo -e "\n[ERROR] Docking simulation failed!"
+  exit 1
+fi
+

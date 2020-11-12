@@ -1,0 +1,229 @@
+#!/bin/bash
+# Gromacs configurator script
+if [ \( $# -gt 0 -a $# -lt 3 \) -o $# -gt 4 ]; then
+  echo "[USAGE] $(basename $0) <dna.pdb> <ligand.pdb> <ligand_charge> [quiet]"
+  echo "        ex: $(basename $0) dna.pdb lig.pdb 1"
+  echo "            $(basename $0) dna.pdb lig.pdb -2 quiet"
+  exit 1
+fi
+
+cat <<EOF
+         +-------------------------------------------------------+ 
+         | Gromacs DNA-Drug Molecular Dynamics automation script |
+         +-------------------------------------------------------+
+
+EOF
+
+DNA_FILE="$1"
+if [ "x$DNA_FILE" == "x" ]; then
+  read -p "-> Insert DNA PDB file name: " DNA_FILE
+fi
+if [ ! -r "$DNA_FILE" ]; then
+  echo "[ERROR] Cannot read DNA file \"${DNA_FILE}\""
+  exit 1
+fi
+DNA_NAME="${DNA_FILE%.*}"
+
+LIGAND_FILE="$2"
+if [ "x$LIGAND_FILE" == "x" ]; then
+  read -p "-> Insert ligand PDB file name: " LIGAND_FILE
+fi
+if [ ! -r "$LIGAND_FILE" ]; then
+  echo "[ERROR] Cannot read Ligand file \"${LIGAND_FILE}\""
+  exit 1
+fi
+LIGAND_NAME="${LIGAND_FILE%.*}"
+
+LIGAND_CHARGE="$3"
+if [ "x$LIGAND_CHARGE" == "x" ]; then
+  read -p "-> Insert ligand charge: " LIGAND_CHARGE
+fi
+if ! [[ "$LIGAND_CHARGE" =~ ^-*[0-9]+$ ]]; then
+  echo "[ERROR]: Ligand charge should be an integer"
+  exit 1
+fi
+
+QUIET=""
+if [ $# -ge 3 ]; then
+  if [ "x$4" == "xquiet" ]; then
+    QUIET="1"
+  else
+    QUIET="0"
+  fi
+fi
+if [ "x$QUIET" == "x" ]; then
+  read -p "-> Quiet output? [y/N]: " QUIET
+  if [ "x$QUIET" == "xy" -o "x$QUIET" == "xY" ]; then
+    QUIET="1"
+  else
+    QUIET="0"
+  fi
+fi
+
+echo -e "\n[STEP 01] Creating DNA topology...\n"
+
+if [ $QUIET -eq 0 ]; then
+  pdb2gmx -ff amber94 \
+          -f "${DNA_FILE}" \
+          -o "${DNA_NAME}_2.pdb" \
+          -p "${DNA_NAME}.top" \
+          -water tip3p \
+          -ignh
+else
+  pdb2gmx -ff amber94 \
+          -f "${DNA_FILE}" \
+          -o "${DNA_NAME}_2.pdb" \
+          -p "${DNA_NAME}.top" \
+          -water tip3p \
+          -ignh &> /dev/null
+fi
+
+if [ $? -ne 0 ]; then
+  echo -e "\n[ERROR] Calculation of DNA topology failed!\n"
+  exit 1
+fi
+
+echo -e "\n[STEP 02] Creating Ligand topology...\n"
+
+if [ $QUIET -eq 0 ]; then
+  acpype -n $LIGAND_CHARGE -r -i "$LIGAND_FILE"
+else
+  acpype -n $LIGAND_CHARGE -r -i "$LIGAND_FILE" > /dev/null
+fi
+
+if [ $? -ne 0 ]; then
+  echo -e "\n[ERROR] Calculation of Ligand topology failed!\n"
+  exit 1
+fi
+
+echo -e "\n[STEP 03] Creating DNA-Drug Complex topology...\n"
+
+grep -h ATOM "${DNA_NAME}_2.pdb" \
+             "${LIGAND_NAME}.acpype/${LIGAND_NAME}_NEW.pdb" > Complex.pdb && \
+cp "${LIGAND_NAME}.acpype/${LIGAND_NAME}_GMX.itp" "${LIGAND_NAME}.itp" && \
+cp "${DNA_NAME}.top" Complex.top && \
+cat Complex.top | sed "/forcefield\.itp\"/a\
+  #include \"${LIGAND_NAME}.itp\"
+" > Complex2.top && \
+echo "${LIGAND_NAME} 1" >> Complex2.top && \
+mv Complex2.top Complex.top
+
+if [ $? -ne 0 ]; then
+  echo -e "\n[ERROR] Creation of DNA-Drug Complex topology failed!\n"
+  exit 1
+fi
+
+echo -e "\n[STEP 04] Preparing the solvent box...\n"
+
+if [ $QUIET -eq 0 ]; then
+  editconf -bt triclinic -f Complex.pdb -o Complex.pdb -d 1.0 -c
+else
+  editconf -bt triclinic -f Complex.pdb -o Complex.pdb -d 1.0 -c &> /dev/null
+fi
+
+if [ $? -ne 0 ]; then
+  echo -e "\n[ERROR] Creation of solvent box failed!\n"
+  exit 1
+fi
+
+echo -e "\n[STEP 05] Filling the solvent box...\n"
+
+if [ $QUIET -eq 0 ]; then
+  genbox -cp Complex.pdb -cs spc216.gro -o Complex_b4ion.pdb -p Complex.top
+else
+  genbox -cp Complex.pdb -cs spc216.gro -o Complex_b4ion.pdb -p Complex.top &> /dev/null
+fi
+
+if [ $? -ne 0 ]; then
+  echo -e "\n[ERROR] Filling of solvent box failed!\n"
+  exit 1
+fi
+
+echo -e "\n[STEP 06] Preparing the ion addtion...\n"
+
+if [ $QUIET -eq 0 ]; then
+  grompp -f em.mdp -c Complex_b4ion.pdb -p Complex.top -o Complex_b4ion.tpr && \
+  cp Complex.top Complex_ion.top
+else
+  grompp -f em.mdp -c Complex_b4ion.pdb -p Complex.top -o Complex_b4ion.tpr &> /dev/null && \
+  cp Complex.top Complex_ion.top
+fi
+
+if [ $? -ne 0 ]; then
+  echo -e "\n[ERROR] Ion addition preparation failed!\n"
+  exit 1
+fi
+
+echo -e "\n[STEP 07] Ion addtion...\n"
+
+echo $'\cc' | genion -s Complex_b4ion.tpr -o Complex_b4em.pdb -neutral -conc 0.15 -p Complex_ion.top -norandom &> genion_tmp_output
+
+SOL_GROUP=$(grep SOL genion_tmp_output | tr -s ' ' | cut -d ' ' -f 2)
+rm genion_tmp_output
+
+if [ $QUIET -eq 0 ]; then
+  echo $SOL_GROUP | genion -s Complex_b4ion.tpr -o Complex_b4em.pdb -neutral \
+                           -conc 0.15 -p Complex_ion.top -norandom
+else
+  echo $SOL_GROUP | genion -s Complex_b4ion.tpr -o Complex_b4em.pdb -neutral \
+                           -conc 0.15 -p Complex_ion.top -norandom &> /dev/null
+fi
+
+if [ $? -ne 0 ]; then
+  echo -e "\n[ERROR] Ion addition failed!\n"
+  exit 1
+fi
+
+echo -e "\n[STEP 08] Preparing the energy minimization...\n"
+
+if [ $QUIET -eq 0 ]; then
+  mv Complex_ion.top Complex.top && \
+  grompp -f em.mdp -c Complex_b4em.pdb -p Complex.top -o em.tpr
+else
+  mv Complex_ion.top Complex.top && \
+  grompp -f em.mdp -c Complex_b4em.pdb -p Complex.top -o em.tpr &> /dev/null
+fi
+
+if [ $? -ne 0 ]; then
+  echo -e "\n[ERROR] Energy minimization preparation failed!\n"
+  exit 1
+fi
+
+echo -e "\n[STEP 09] Energy minimization...\n"
+
+if [ $QUIET -eq 0 ]; then
+  mdrun -v -deffnm em
+else
+  mdrun -v -deffnm em &> /dev/null
+fi
+
+if [ $? -ne 0 ]; then
+  echo -e "\n[ERROR] Energy minimization failed!\n"
+  exit 1
+fi
+
+echo -e "\n[STEP 10] Preparing the molecular dynamics...\n"
+
+if [ $QUIET -eq 0 ]; then
+  grompp -f md.mdp -c em.gro -p Complex.top -o md.tpr
+else
+  grompp -f md.mdp -c em.gro -p Complex.top -o md.tpr &> /dev/null
+fi
+
+if [ $? -ne 0 ]; then
+  echo -e "\n[ERROR] Molecular dynamics preparation failed!\n"
+  exit 1
+fi
+
+echo -e "\n[STEP 11] Molecular dynamics simulation...\n"
+
+mdrun -v -deffnm md
+
+if [ $? -ne 0 ]; then
+  echo -e "\n[ERROR] Molecular dynamics simulation failed!\n"
+  exit 1
+else
+  echo -e "\n[SUCCESS] All operations went well !!!\n"
+  exit 0
+fi
+

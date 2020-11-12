@@ -1,0 +1,104 @@
+#!/bin/bash
+# Autodock startup script
+
+# MGLTools version
+MGLTOOLS_VER=1.5.6rc2
+
+# Try to automatically set Autodock home directory
+AUTODOCK_HOME="$HOME"
+if grep "Startup" ~/.mgltools/${MGLTOOLS_VER}/.settings &> /dev/null; then
+  COUNT=-1
+  while read LINE; do
+    if [ "x$LINE" == "xS'Startup Directory'" ]; then
+      COUNT=1
+    elif [ $COUNT -eq 0 ]; then
+      AUTODOCK_HOME="$(echo \"$LINE\" | cut -d \' -f 2)"
+      break
+    else
+      COUNT=$(expr $COUNT - 1)
+    fi
+  done < "${HOME}/.mgltools/${MGLTOOLS_VER}/.settings"
+fi
+cd $AUTODOCK_HOME
+
+# Command line parameters, if any
+if [ $# -eq 4 ]; then
+  if [ "x$1" == "x-g" ]; then
+    GRID_FILE="$2"
+  elif [ "x$1" == "x-d" ]; then
+    DOCKING_FILE="$2"
+  fi
+  if [ "x$3" == "x-g" ]; then
+    GRID_FILE="$4"
+  elif [ "x$3" == "x-d" ]; then
+    DOCKING_FILE="$4"
+  fi
+elif [ $# -ne 0 ]; then
+  echo "[USAGE] $(basename ${0}) [-g <grid_file>|SKIP] [-d <docking_file>|SKIP]"
+  echo "        NOTE: avoid any extension! Assuming .gpf for grid and .dpf for docking"
+  exit 1
+fi
+
+# Title
+cat <<END
++------------------------------------+
+| AutoDock docking procedure started |
++------------------------------------+
+
+Good morning, $USER :)
+END
+
+# Grid calculation
+echo -e "\n[STEP 1] Grid calculation"
+
+if [ "x$GRID_FILE" == "x" ]; then
+  read -p "-> Insert grid file name (without extension) [SKIP]: " GRID_FILE
+fi
+if [ "x$GRID_FILE" == "x" -o "x$GRID_FILE" == "xSKIP" ]; then
+  echo -e "\n[SKIP] Skipping grid calculation step"
+else
+  if [ ! -f ${GRID_FILE}.gpf -o ! -r ${GRID_FILE}.gpf ]; then
+    echo -e "\n[ERROR] Cannot read grid file \"${GRID_FILE}.gpf\"!"
+    exit 1
+  fi
+  
+  echo "-> Calculating the grid..."
+  autogrid4 -p ${GRID_FILE}.gpf -l ${GRID_FILE}.glg
+  if [ $? -ne 0 ]; then
+    echo -e "\n[ERROR] Grid calculation failed!"
+    rm "${AUTODOCK_HOME}/${GRID_FILE}.glg"
+    exit 1
+  else
+    echo -e "\n[SUCCESS] Grid calculation went well!"
+  fi
+fi
+
+# Docking simulation
+echo -e "\n[STEP 2] Docking simulation"
+
+if [ "x$DOCKING_FILE" == "x" ]; then
+  read -p "-> Insert docking file name (without extension) [SKIP]: " DOCKING_FILE
+fi
+if [ "x$DOCKING_FILE" == "x" -o "x$DOCKING_FILE" == "xSKIP" ]; then
+  echo -e "\n[SKIP] Skipping docking simulation step"
+else
+  if [ ! -f ${DOCKING_FILE}.dpf -o ! -r ${DOCKING_FILE}.dpf ]; then
+    echo "[ERROR] Cannot read grid file \"${DOCKING_FILE}.dpf\"!"
+    exit 1
+  fi
+  
+  echo "-> Performing the docking..."
+  autodock4 -p ${DOCKING_FILE}.dpf -l ${DOCKING_FILE}.dlg
+  #xterm -geometry 150x50 -e "tail -n +1 -f ${AUTODOCK_HOME}/${DOCKING_FILE}.dlg"
+  
+  if ! grep "Successful Completion" ${DOCKING_FILE}.dlg &> /dev/null; then
+    echo -e "\n[ERROR] Docking simulation failed!"
+    rm "${AUTODOCK_HOME}/${DOCKING_FILE}.dlg"
+    exit 1
+  else
+    echo -e "\n[SUCCESS] Docking simulation went well!"
+  fi
+fi
+
+exit 0
+
